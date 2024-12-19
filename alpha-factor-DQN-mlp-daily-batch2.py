@@ -12,6 +12,7 @@ import logging
 import time
 import datetime  # Add this import statement
 from tensorflow.keras.initializers import HeNormal  # 导入 HeNormal 初始化器
+import os  # 添加此导入
 
 # Configure logging to save to a file
 logging.basicConfig(
@@ -252,8 +253,8 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
     agent = DQLAgent(state_size, action_size)
     batch_size = 32
     logging.info("Starting training...")
-    epoch_num = 5
-    epoch_rewards = []
+    epoch_num = 30
+    epoch_rewards = []  # 记录每个 epoch 的总奖励
 
     for episode in range(epoch_num):
         state = train_data[features].iloc[0].values.reshape(1, -1)
@@ -327,10 +328,19 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
         # 记录每个 epoch 的总奖励
         total_value = cash + holdings_value * next_price
         epoch_reward = total_value - initial_balance
-        epoch_rewards.append(epoch_reward)
+        epoch_rewards.append(epoch_reward)  # 记录每个 epoch 的总奖励
         total_value = float(total_value)
         epoch_reward = float(epoch_reward)
         logging.info(f"Epoch: {episode + 1}, Total Value: {total_value:.2f}, Total Reward: {epoch_reward:.2f}")
+
+    # 在训练结束后绘制总奖励图
+    plt.figure(figsize=(14, 7))
+    plt.plot(epoch_rewards, label="Total Reward per Epoch")
+    plt.title("Total Reward Over Epochs")
+    plt.xlabel("Epoch")
+    plt.ylabel("Total Reward")
+    plt.legend()
+    plt.show()
 
     # 保存模型
     agent.save_model(model_save_path)
@@ -402,13 +412,16 @@ def backtest(agent, test_data, features, initial_balance=100000.0, transaction_c
 
 
 if __name__ == "__main__":
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")  # 获取当前时间戳
+    output_dir = f"DQN-RL-{timestamp}"  # 创建文件夹名
+    os.makedirs(output_dir, exist_ok=True)  # 创建文件夹
+
     ticker, start_date = "TSLA", "2020-01-01"
     data = download_daily_data(ticker, start_date)
     data = calculate_alpha_factors(data)
     data, features = prepare_data(data)
     
-   
-    agent, test_data, features, epoch_rewards = train_agent(data, features, model_save_path="dql_agent_mlp_model_daily.h5")
+    agent, test_data, features, epoch_rewards = train_agent(data, features, model_save_path=os.path.join(output_dir, "dql_agent_mlp_model_daily.h5"))
     
     state_size = len(features)
     action_size = 3  # 动作空间：0=买入, 1=卖出, 2=持有
@@ -416,23 +429,21 @@ if __name__ == "__main__":
 
     # Check if agent and test_data are valid before backtesting
     if agent is not None and test_data is not None:
-        portfolio_values, buy_signals, sell_signals = backtest(agent, test_data, features, model_path="dql_agent_mlp_model_daily.h5")
+        portfolio_values, buy_signals, sell_signals = backtest(agent, test_data, features, model_path=os.path.join(output_dir, "dql_agent_mlp_model_daily.h5"))
     else:
         logging.error("Agent training failed or test data is empty. Backtesting cannot proceed.")
         exit()  # Prevents the code from trying to plot None values
 
     plt.figure(figsize=(14, 7))
-    # Check if test_data is valid before plotting
     if test_data is not None:
         plt.plot(test_data['Close'], label='Close Price')
-        # Convert buy_signals to integer indices
         buy_signal_indices = [test_data.index.get_loc(ts) for ts in buy_signals]
         plt.scatter(test_data.index[buy_signal_indices], test_data['Close'].iloc[buy_signal_indices], marker='^', color='g', label='Buy Signal', alpha=1)
-        # Convert sell_signals to integer indices
         sell_signal_indices = [test_data.index.get_loc(ts) for ts in sell_signals]
         plt.scatter(test_data.index[sell_signal_indices], test_data['Close'].iloc[sell_signal_indices], marker='v', color='r', label='Sell Signal', alpha=1)
         plt.title("Trading Strategy - Buy & Sell Signals")
         plt.legend()
+        plt.savefig(os.path.join(output_dir, "trading_strategy_signals.png"))  # 保存图像
         plt.show()
     else:
         logging.error("No valid test data available for plotting.")
@@ -441,4 +452,5 @@ if __name__ == "__main__":
     plt.plot(portfolio_values, label="Portfolio Value")
     plt.title("Portfolio Value Over Time")
     plt.legend()
+    plt.savefig(os.path.join(output_dir, "portfolio_value_over_time.png"))  # 保存图像
     plt.show()
