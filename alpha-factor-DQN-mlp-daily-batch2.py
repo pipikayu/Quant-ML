@@ -14,14 +14,6 @@ import datetime  # Add this import statement
 from tensorflow.keras.initializers import HeNormal  # 导入 HeNormal 初始化器
 import os  # Add this import statement
 
-# Configure logging to save to a file
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    filename='trading_log.txt',  # Specify the log file name
-    filemode='w'  # 'w' to overwrite the file each time, 'a' to append
-)
-
 def download_daily_data(ticker, start_date):
     logging.info(f"Fetching daily data for {ticker} from {start_date}.")
     end_date = datetime.datetime.now().strftime("%Y-%m-%d")  # Get the latest date
@@ -415,6 +407,14 @@ if __name__ == "__main__":
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")  # 获取当前时间戳
     output_dir = f"DQN-RL-Daily-{timestamp}"  # 创建文件夹名
     os.makedirs(output_dir, exist_ok=True)  # 创建文件夹
+
+    # Configure logging to save to a file
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        filename=os.path.join(output_dir, 'trading_log.txt'),  # Update the log file path
+        filemode='w'  # 'w' to overwrite the file each time, 'a' to append
+    )
 
     ticker, start_date = "TSLA", "2020-01-01"
     data = download_daily_data(ticker, start_date)

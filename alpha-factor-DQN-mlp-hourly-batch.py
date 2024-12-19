@@ -12,12 +12,18 @@ import logging
 import time
 import datetime  # Add this import statement
 from tensorflow.keras.initializers import HeNormal  # 导入 HeNormal 初始化器
+import os  # Add this import statement
 
-# Configure logging to save to a file
+# Create a directory with a timestamp
+timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")  # Get current timestamp
+directory_name = f"DQN-RL-Hourly-{timestamp}"  # Create directory name
+os.makedirs(directory_name, exist_ok=True)  # Create the directory
+
+# Configure logging to save to a file in the created directory
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    filename='trading_log.txt',  # Specify the log file name
+    filename=os.path.join(directory_name, 'trading_log.txt'),  # Specify the log file name in the new directory
     filemode='w'  # 'w' to overwrite the file each time, 'a' to append
 )
 
@@ -289,8 +295,8 @@ def calculate_reward(current_value, previous_value, action, last_action, holding
     elif action == 2:  # 持有
         price_change = (current_value - previous_value) / previous_value  # 计算价格变化
         reward += price_change  # 根据市场表现奖励或惩罚持有
-        if holding_period >= 5:  # 连续持有的奖励
-            reward += 0.001
+        if holding_period == 30:  # 连续持有的奖励
+            reward += 0.0001
 
     # 回撤惩罚
     drawdown = (previous_value - current_value) / previous_value
@@ -313,10 +319,10 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
     state_size = len(features)
     action_size = 3  # 动作空间：0=买入, 1=卖出, 2=持有
     agent = DQLAgent(state_size, action_size)
-    batch_size = 32
+    batch_size = 64
     logging.info("Starting training...")
-    epoch_num = 50
-    epoch_rewards = []
+    epoch_num = 150
+    epoch_rewards = []  # 记录每个 epoch 的总奖励
 
     for episode in range(epoch_num):
         state = train_data[features].iloc[0].values.reshape(1, -1)
@@ -326,9 +332,14 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
         holding_period = 0  # 持有时间计数
         total_reward = 0
         cash = float(cash)
-        for t in range(len(train_data) - 1):
+        for t in range(len(train_data) - 8):
             current_price = train_data['Close'].iloc[t]
-            next_price = train_data['Close'].iloc[t + 1]
+            #next_price = train_data['Close'].iloc[t + 1]
+            next_price = 0.0
+            if t + 8 < len(train_data):  # 确保不越界
+                next_price = train_data['Close'].iloc[t + 8]  # 获取下一个时间步的价格
+            else:
+                next_price = 0.0
             action = agent.act(state)
 
             # 更新资金、持仓和持有期
@@ -361,10 +372,10 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
 
             # 计算奖励
             reward = 0
-            if t + 1 < len(train_data):  # 确保不越界
-                next_price = train_data['Close'].iloc[t + 1]  # 获取下一个时间步的价格
-            else:
-                next_price = 0.0
+            #if t + 1 < len(train_data):  # 确保不越界
+            #    next_price = train_data['Close'].iloc[t + 1]  # 获取下一个时间步的价格
+            #else:
+            #    next_price = 0.0
             reward = calculate_reward(current_value, previous_value, action, last_action, holding_period, next_price, transaction_cost)
             total_reward += reward
             
@@ -394,6 +405,15 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
         total_value = float(total_value)
         epoch_reward = float(epoch_reward)
         logging.info(f"Epoch: {episode + 1}, Total Value: {total_value:.2f}, Total Reward: {epoch_reward:.2f}")
+
+    # 绘制每个 epoch 的最终 reward 曲线
+    plt.figure(figsize=(12, 6))
+    plt.plot(range(1, epoch_num + 1), epoch_rewards, marker='o')
+    plt.title("Total Reward per Epoch")
+    plt.xlabel("Epoch")
+    plt.ylabel("Total Reward")
+    plt.grid()
+    plt.show()
 
     # 保存模型
     agent.save_model(model_save_path)
@@ -470,7 +490,7 @@ if __name__ == "__main__":
     data = calculate_alpha_factors(data)
     data, features = prepare_data(data)
     
-    agent, test_data, features, epoch_rewards = train_agent(data, features, model_save_path="dql_agent_mlp_model_hourly.h5")
+    agent, test_data, features, epoch_rewards = train_agent(data, features, model_save_path=os.path.join(directory_name, "dql_agent_mlp_model_hourly.h5"))  # Save model in the new directory
     
     state_size = len(features)
     action_size = 3  # 动作空间：0=买入, 1=卖出, 2=持有
@@ -495,6 +515,7 @@ if __name__ == "__main__":
         plt.scatter(test_data.index[sell_signal_indices], test_data['Close'].iloc[sell_signal_indices], marker='v', color='r', label='Sell Signal', alpha=1)
         plt.title("Trading Strategy - Buy & Sell Signals")
         plt.legend()
+        plt.savefig(os.path.join(directory_name, "trading_strategy_signals.png"))  # Save the plot in the new directory
         plt.show()
     else:
         logging.error("No valid test data available for plotting.")
@@ -503,4 +524,5 @@ if __name__ == "__main__":
     plt.plot(portfolio_values, label="Portfolio Value")
     plt.title("Portfolio Value Over Time")
     plt.legend()
+    plt.savefig(os.path.join(directory_name, "portfolio_value_over_time.png"))  # Save the plot in the new directory
     plt.show()
