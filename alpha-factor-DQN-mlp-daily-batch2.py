@@ -12,7 +12,7 @@ import logging
 import time
 import datetime  # Add this import statement
 from tensorflow.keras.initializers import HeNormal  # 导入 HeNormal 初始化器
-import os  # 添加此导入
+import os  # Add this import statement
 
 # Configure logging to save to a file
 logging.basicConfig(
@@ -413,7 +413,7 @@ def backtest(agent, test_data, features, initial_balance=100000.0, transaction_c
 
 if __name__ == "__main__":
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")  # 获取当前时间戳
-    output_dir = f"DQN-RL-{timestamp}"  # 创建文件夹名
+    output_dir = f"DQN-RL-Daily-{timestamp}"  # 创建文件夹名
     os.makedirs(output_dir, exist_ok=True)  # 创建文件夹
 
     ticker, start_date = "TSLA", "2020-01-01"
