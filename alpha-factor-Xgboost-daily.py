@@ -123,7 +123,16 @@ def prepare_data(data, ticker):
             data[new_feature_name] = data[ln_features[i]] * data[ln_features[j]]
             multi_features.append(new_feature_name)  # 确保新特征名被添加到 features 列表中
 
-    features += ln_features + multi_features
+    # 新增：生成两两特征相除的新特征，分母加0.5
+    div_features = []
+    for i in range(len(ln_features)):
+        for j in range(len(ln_features)):
+            if i != j:  # 避免除以自身
+                new_feature_name = f"{ln_features[i]}_div_{ln_features[j]}"
+                data[new_feature_name] = data[ln_features[i]] / (data[ln_features[j]] + 0.5)  # 分母加0.5
+                div_features.append(new_feature_name)
+
+    features += ln_features + multi_features + div_features  # 更新特征列表
     # 计算未来 12 个周期的最大和最小收盘价
     data = data.iloc[::-1]
     data['future_max_close'] = data['Close'].rolling(window=10).max()
@@ -142,7 +151,7 @@ def prepare_data(data, ticker):
     data.loc[data['future_max_close'] >= data['Close'][ticker] * 1.05, 'action'] = 0  # 买入
 
     # 然后设置卖出信号，只有在当前 action 仍为持有时才会更新
-    data.loc[(data['future_min_close'] <= data['Close'][ticker] * 0.95) & (data['action'] == 2), 'action'] = 1  # 卖出
+    data.loc[(data['future_min_close'] <= data['Close'][ticker] * 0.96) & (data['action'] == 2), 'action'] = 1  # 卖出
 
     # 标准化特征，不包括 action 列
     scaler = StandardScaler()
@@ -160,7 +169,7 @@ def prepare_data(data, ticker):
     
     return data, features
 
-def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001, train_split=0.8, model_save_path="xgboost_model.json"):
+def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001, train_split=0.75, model_save_path="xgboost_model.json"):
     """
     训练 XGBoost 智能体，基于给定的市场数据和特征。
     """
@@ -304,7 +313,7 @@ if __name__ == "__main__":
         filemode='w'  # 'w' to overwrite the file each time, 'a' to append
     )
 
-    ticker, start_date = "TSLA", "2020-01-01"
+    ticker, start_date = "BABA", "2018-01-01"
     data = download_daily_data(ticker, start_date)
     data = calculate_alpha_factors(data)
     data, features = prepare_data(data, ticker)
