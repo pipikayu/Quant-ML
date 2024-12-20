@@ -188,7 +188,7 @@ class DQLAgent:
     def __init__(self, state_size, action_size):
         self.state_size = state_size
         self.action_size = action_size
-        self.memory = deque(maxlen=2000)
+        self.memory = []
         self.gamma = 0.95
         self.epsilon = 1.0
         self.epsilon_min = 0.01
@@ -223,18 +223,15 @@ class DQLAgent:
         return np.argmax(q_values[0])
 
     def replay(self, batch_size):
-        # 按时间顺序从 memory 中选择 minibatch
-        # 采样时要保证时间上的连续性
-        minibatch = []
-        for i in range(batch_size):
-            idx = random.randint(0, len(self.memory) - 2)  # 防止越界，确保 next_state 存在
-            state, action, reward, next_state, done = self.memory[idx]
-            minibatch.append((state, action, reward, next_state, done))
+        # 使用随机采样从 memory 中选择 minibatch
+        if len(self.memory) < batch_size:
+            return  # 如果 memory 中的样本少于 batch_size，直接返回
+
+        minibatch = random.sample(self.memory, batch_size)  # 随机选择 minibatch
 
         # 提取所有状态和下一个状态
-        states = np.array([x[0] for x in minibatch]).reshape(batch_size, -1)
-        next_states = np.array([x[3] for x in minibatch]).reshape(batch_size, -1)
-        
+        states = np.array([x[0] for x in minibatch]).reshape(len(minibatch), -1)
+        next_states = np.array([x[3] for x in minibatch]).reshape(len(minibatch), -1)
 
         actions = np.array([x[1] for x in minibatch])
         rewards = np.array([x[2] for x in minibatch])
@@ -252,7 +249,7 @@ class DQLAgent:
         target_f = self.model.predict(states, verbose=0)  # 批量预测
 
         # 更新每个样本的 target_f，目标是根据动作索引来更新
-        for i in range(batch_size):
+        for i in range(len(minibatch)):
             target_f[i][actions[i]] = targets[i]
 
         # 执行一次批量训练
@@ -321,7 +318,7 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
     agent = DQLAgent(state_size, action_size)
     batch_size = 64
     logging.info("Starting training...")
-    epoch_num = 150
+    epoch_num = 30
     epoch_rewards = []  # 记录每个 epoch 的总奖励
 
     for episode in range(epoch_num):
@@ -334,12 +331,7 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
         cash = float(cash)
         for t in range(len(train_data) - 8):
             current_price = train_data['Close'].iloc[t]
-            #next_price = train_data['Close'].iloc[t + 1]
-            next_price = 0.0
-            if t + 8 < len(train_data):  # 确保不越界
-                next_price = train_data['Close'].iloc[t + 8]  # 获取下一个时间步的价格
-            else:
-                next_price = 0.0
+            next_price = train_data['Close'].iloc[t + 8]  # 获取下一个时间步的价格
             action = agent.act(state)
 
             # 更新资金、持仓和持有期
@@ -371,21 +363,17 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
             current_value = current_value.item()  # Convert to scalar if it's a Series
 
             # 计算奖励
-            reward = 0
-            #if t + 1 < len(train_data):  # 确保不越界
-            #    next_price = train_data['Close'].iloc[t + 1]  # 获取下一个时间步的价格
-            #else:
-            #    next_price = 0.0
             reward = calculate_reward(current_value, previous_value, action, last_action, holding_period, next_price, transaction_cost)
             total_reward += reward
             
             # 状态更新
-            next_state = train_data[features].iloc[t + 1].values.reshape(1, -1)
-            agent.remember(state, action, reward, next_state, t == len(train_data) - 2)
-            state = next_state
+            next_state = train_data[features].iloc[t + 8].values.reshape(1, -1)  # 更新为相距8个时间步的状态
+            agent.remember(state, action, reward, next_state, t == len(train_data) - 9)  # 更新为相距8个时间步的状态
+            
+            # 更新 state 为下一个时间步的状态
+            state = train_data[features].iloc[t + 1].values.reshape(1, -1)  # 更新为当前时间步的下一个状态
             last_action = action
-            #previous_value = current_value
-
+        
             # 经验回放
             if len(agent.memory) > batch_size:
                 agent.replay(batch_size)
