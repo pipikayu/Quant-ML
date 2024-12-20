@@ -160,7 +160,7 @@ def prepare_data(data, ticker):
     
     return data, features
 
-def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001, train_split=0.75, model_save_path="xgboost_model.json"):
+def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001, train_split=0.8, model_save_path="xgboost_model.json"):
     """
     训练 XGBoost 智能体，基于给定的市场数据和特征。
     """
@@ -304,11 +304,16 @@ if __name__ == "__main__":
         filemode='w'  # 'w' to overwrite the file each time, 'a' to append
     )
 
-    ticker, start_date = "BABA", "2018-01-01"
+    ticker, start_date = "TSLA", "2020-01-01"
     data = download_daily_data(ticker, start_date)
     data = calculate_alpha_factors(data)
     data, features = prepare_data(data, ticker)
     
+    # Check if data is None before proceeding
+    if data is None:
+        logging.error("Data preparation failed. Exiting.")
+        exit()  # Exit if data preparation failed
+
     # 训练 XGBoost 模型并获取测试数据
     model, test_data = train_agent(data, features, model_save_path=os.path.join(output_dir, "xgboost_model.json"))
     
