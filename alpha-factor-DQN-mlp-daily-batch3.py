@@ -14,8 +14,9 @@ import datetime  # Add this import statement
 from tensorflow.keras.initializers import HeNormal  # 导入 HeNormal 初始化器
 import os  # Add this import statement
 from tensorflow.keras.regularizers import l1  # 添加L1正则化器的导入
-import optuna  # 添加Optuna库
 import sys  # 添加导入语句
+import matplotlib
+matplotlib.use('Agg')  # Use a non-interactive backend
 
 def download_daily_data(ticker, start_date):
     logging.info(f"Fetching daily data for {ticker} from {start_date}.")
@@ -125,7 +126,7 @@ def prepare_data(data):
     return data, features
 
 class DQLAgent:
-    def __init__(self, state_size, action_size):
+    def __init__(self, state_size, action_size, transaction_cost=0.001):
         self.state_size = state_size
         self.action_size = action_size
         self.memory = deque(maxlen=2000)
@@ -134,6 +135,7 @@ class DQLAgent:
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.998
         self.learning_rate = 0.001
+        self.transaction_cost = transaction_cost
         self.model = self._build_model()
 
     def _build_model(self):
@@ -157,10 +159,13 @@ class DQLAgent:
         self.memory.append((state, action, reward, next_state, done))
 
     def act(self, state):
-        if np.random.rand() <= self.epsilon:
-            return random.randrange(self.action_size)
-        q_values = self.model.predict(state, verbose=0)
-        return np.argmax(q_values[0])
+        q_values = self.model.predict(state.reshape(1, -1), verbose=0)
+        predicted_action = np.argmax(q_values[0])
+        if predicted_action == 0 and np.max(q_values) < self.transaction_cost * 100:  # 买入动作预测收益过低
+            return 2, q_values  # 持有
+        elif predicted_action == 1 and np.max(q_values) < self.transaction_cost * 100:
+            return 2, q_values  # 持有
+        return predicted_action, q_values
 
     def replay(self, batch_size):
         # 按时间顺序从 memory 中选择 minibatch
@@ -186,7 +191,7 @@ class DQLAgent:
 
         # 计算 target
         targets = rewards + (1 - dones) * self.gamma * next_q_values
-        targets = np.clip(targets, -1e6, 1e6)  # 确保目标值不爆炸
+        targets = np.clip(targets, -10, 10)  # 确保目标值不爆炸
 
         # 获取当前状态对应的 Q 值
         target_f = self.model.predict(states, verbose=0)  # 批量预测
@@ -201,6 +206,116 @@ class DQLAgent:
         # 更新 epsilon，逐步降低探索概率
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
+    
+    def replay_n(self, batch_size, n_step=3):
+        # Ensure there are enough samples in memory
+        if len(self.memory) < batch_size + n_step:
+            return  # Not enough samples to replay
+
+        # From memory, sample continuous time sequences
+        valid_indices = [i for i in range(len(self.memory) - n_step)]
+        minibatch_start_indices = np.random.choice(valid_indices, batch_size, replace=False)
+
+        memory_list = list(self.memory)
+        minibatch = [memory_list[i:i + n_step] for i in minibatch_start_indices]
+
+        states = []
+        actions = []
+        targets = []
+        # 遍历每个时间序列样本
+        for sequence in minibatch:
+            assert len(sequence) == n_step, "Sequence length is not consistent with n_step."
+
+            G = 0  # 初始化累积奖励
+            gamma_acc = 1  # 折扣因子的累积值
+            # 从后往前计算 n 步奖励
+            for step in reversed(range(len(sequence))):  # 从后往前遍历时间序列
+                state, action, reward, next_state, done = sequence[step]
+                G = reward + gamma_acc * G  # 累积奖励
+                gamma_acc *= self.gamma  # 折扣因子递增
+                if done:  # 如果遇到终止状态，停止累积
+                    break
+
+            # 加入未来 Q 值（仅适用于非终止状态）
+            _, action, _, next_state, done = sequence[0]  # 当前序列的起始样本
+            if not done:
+                next_q_value = np.amax(self.model.predict(next_state.reshape(1, -1), verbose=0)[0])
+                next_q_value = np.clip(next_q_value, -1e4, 1e4)  # 限制未来 Q 值范围
+                G += gamma_acc * next_q_value
+
+            # 保存状态、动作和目标值
+            states.append(state)
+            actions.append(action)
+            targets.append(G)
+
+        # 转换为 NumPy 数组
+        states = np.array(states).reshape(batch_size, -1)  # Ensure correct shape
+        actions = np.array(actions).reshape(batch_size, -1)
+        targets = np.array(targets).reshape(batch_size, -1)
+
+        # Ensure states has the correct shape for the model
+        if len(states.shape) != 2 or states.shape[1] != self.state_size:
+            raise ValueError(f"Invalid states shape: {states.shape}. Expected shape: (batch_size, {self.state_size}).")
+
+        # Get current Q values
+        target_f = self.model.predict(states, verbose=0)
+        for i in range(batch_size):
+            assert 0 <= actions[i] < self.action_size, f"Invalid action {actions[i]} detected."
+            target_f[i][actions[i]] = targets[i]
+
+        # 批量更新模型
+        self.model.fit(states, target_f, epochs=1, verbose=0)
+
+        # 动态调整 epsilon
+        if self.epsilon > self.epsilon_min:
+            self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+   
+    def replay_n2(self, batch_size, n_step=3):
+        """
+        优化的经验回放函数，支持 n 步奖励从后往前计算，提升训练效率。
+        """
+        if len(self.memory) < batch_size + n_step:
+            return  # Not enough samples to replay
+
+        # 从 memory 中随机采样连续时间序列
+        valid_indices = [i for i in range(len(self.memory) - n_step)]
+        minibatch_start_indices = np.random.choice(valid_indices, batch_size, replace=False)
+        memory_list = list(self.memory)
+        minibatch = [memory_list[idx:idx + n_step] for idx in minibatch_start_indices]
+        # 批量构建数据
+        states, actions, rewards, dones, next_states = [], [], [], [], []
+        for sequence in minibatch:
+            rewards_seq = np.array([s[2] for s in reversed(sequence)])
+            dones_seq = np.array([s[4] for s in reversed(sequence)])
+            gamma_vector = np.cumprod([1] + [self.gamma] * (len(rewards_seq) - 1))[:len(rewards_seq)]  # 折扣因子向
+            G = np.dot(rewards_seq, gamma_vector)  # 矢量化计算奖励
+            if not dones_seq[0]:
+                next_states.append(sequence[0][3])
+                rewards.append(G)
+                actions.append(sequence[0][1])
+                states.append(sequence[0][0])
+            #print(sequence[0][1],rewards_seq, G)
+
+        next_states = np.array(next_states).reshape(batch_size, -1)
+        if len(next_states) > 0:
+            next_q_values = self.model.predict(np.array(next_states), verbose=0)
+            max_next_q_values = np.amax(next_q_values, axis=1)
+            rewards += self.gamma * max_next_q_values
+
+        # 构造目标 Q 值
+        states = np.array(states).reshape(batch_size, -1)
+        actions = np.array(actions).reshape(batch_size, -1)
+        rewards = np.array(rewards).reshape(batch_size, -1)
+
+        target_f = self.model.predict(states, verbose=0)
+        target_f[np.arange(len(actions)), actions] = rewards
+        # 批量更新模型
+        self.model.fit(states, target_f, epochs=1, verbose=0)
+
+        # 动态调整 epsilon
+        if self.epsilon > self.epsilon_min:
+            self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+
 
     def save_model(self, model_filename):
         #timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")  # 获取当前时间戳
@@ -214,7 +329,7 @@ class DQLAgent:
         logging.info(f"Model loaded from {model_path}.")  # 记录加载信息
 
 # 奖励函数的设计：如果卖出时股价涨幅较大，给予高奖励；如果持有股价下跌，给予惩罚。
-def calculate_reward(current_value, previous_value, action, last_action, holding_period, buy_price, next_price, transaction_cost=0.001):
+def calculate_reward(current_value, previous_value, action, last_action, holding_period, next_price, transaction_cost=0.001):
     """
     根据收益率、交易成本、持有时间和回撤计算奖励。
     """
@@ -234,16 +349,73 @@ def calculate_reward(current_value, previous_value, action, last_action, holding
 
     elif action == 2:  # 持有
         price_change = (current_value - previous_value) / previous_value  # 计算价格变化
-        reward += price_change  # 根据市场表现奖励或惩罚持有
-        if holding_period >= 5:  # 连续持有的奖励
+        reward = price_change
+        if price_change <= 0.005:
+            reward -= 0.001
+        #reward += price_change  # 根据市场表现奖励或惩罚持有
+        if holding_period == 5:  # 连续持有的奖励
             reward += 0.001
 
     # 回撤惩罚
     drawdown = (previous_value - current_value) / previous_value
     if drawdown >= 0.05:  # 如果回撤超过5%
-        reward -= 0.05 * drawdown  # 动态惩罚，回撤越大惩罚越大
+        reward -= 0.5 * drawdown  # 动态惩罚，回撤越大惩罚越大
 
+    if abs(reward) < 0.001:
+        reward -= 0.01  # 惩罚低收益交易
     return reward
+
+def calculate_reward_2(current_value, previous_value, action, last_action, holding_period, current_price, next_price, holdings, transaction_cost=0.001):
+    """
+    改进后的奖励函数，增加对未来趋势、持有时间、回撤的动态调整。
+    """
+    if previous_value == 0:
+        previous_value = 1e-10  # 避免除零
+
+    reward = 0  # 初始化奖励
+    price_change = 0.0
+    
+    # 动作奖励逻辑
+    if action == 0:  # 买入
+        reward = (current_value - previous_value) / previous_value  # 买入后的资产增值
+        reward -= transaction_cost  # 扣除交易成本
+
+    elif action == 1:  # 卖出
+        #reward = (previous_value - current_value) / previous_value
+        reward -= transaction_cost  # 扣除交易成本
+        # 增加对未来价格下跌的奖励
+        future_trend_penalty = (current_price - next_price) / current_price
+        # Ensure future_trend_penalty is a scalar
+        future_trend_penalty = future_trend_penalty.item()  # Convert to scalar if it's a Series
+        if future_trend_penalty > 0:
+            reward += future_trend_penalty
+        else:
+            reward -= abs(future_trend_penalty)
+
+    elif action == 2:  # 持有
+        price_change = (next_price - current_price) / current_price
+        if holdings > 0:  # 持股期持有
+            reward += price_change * 0.5  # 股价变化的奖励
+            # 持有时间奖励
+            if price_change >= 0.01:
+                reward += holding_period * 0.0001
+        else:  # 非持股期持有
+            if price_change <= 0:
+                reward += abs(price_change) * 0.5  # 规避风险的奖励
+            elif price_change > 0:
+                reward -= price_change             # 错失机会的惩罚
+    
+    # 动态回撤惩罚
+    drawdown = (previous_value - current_value) / previous_value
+    if drawdown >= 0.05:
+        reward -= drawdown
+
+    logging.info(f"Action: {action}, Current Price: {current_price}, Next Price: {next_price}, Reward: {reward}, Drawdown: {drawdown}, Pct_change:{price_change}")  # New logging statement
+
+    # 扩大奖励值范围
+    reward *= 100.0
+    return reward
+
 def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001, train_split=0.8, model_save_path="dql_agent_model.h5"):
     """
     训练 DQN 智能体，基于给定的市场数据和特征。
@@ -263,19 +435,19 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
     logging.info("Starting training...")
     epoch_num = 10
     epoch_rewards = []  # 记录每个 epoch 的总奖励
-
+    q_values = []
     for episode in range(epoch_num):
         state = train_data[features].iloc[0].values.reshape(1, -1)
         cash, holdings = initial_balance, 0
         previous_value = initial_balance
         last_action = 2  # 初始为持有
         holding_period = 0  # 持有时间计数
-        total_reward = 0
+        total_reward = 0.0  # Initialize as float instead of just 0
         cash = float(cash)
         for t in range(len(train_data) - 1):
-            current_price = train_data['Close'].iloc[t]
-            next_price = train_data['Close'].iloc[t + 1]
-            action = agent.act(state)
+            current_price = train_data['Close'].iloc[t].iloc[0]
+            next_price = train_data['Close'].iloc[t + 1].iloc[0]
+            action, q_values = agent.act(state)
 
             # 更新资金、持仓和持有期
             if action == 0:  # 买入逻辑
@@ -288,9 +460,11 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
             elif action == 1:  # 卖出逻辑
                 cash += holdings * current_price * (1 - transaction_cost)  # 计算卖出后现金
                 holdings = 0  # 清空持仓
+                holding_period = 0  # 重置持有时间
 
             elif action == 2:  # 持有逻辑
-                holding_period += 1
+                if holdings >= 0:
+                    holding_period += 1
 
             # 确保 holdings 是标量
             if isinstance(holdings, (pd.Series, np.ndarray)):
@@ -306,32 +480,27 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
             current_value = current_value.item()  # Convert to scalar if it's a Series
 
             # 计算奖励
-            reward = 0
-            if t + 1 < len(train_data):  # 确保不越界
-                next_price = train_data['Close'].iloc[t + 1]  # 获取下一个时间步的价格
-            else:
-                next_price = 0.0
-            reward = calculate_reward(current_value, previous_value, action, last_action, holding_period, next_price, transaction_cost)
-            total_reward += reward
+            reward = 0.0
+            reward = calculate_reward_2(current_value, previous_value, action, last_action, holding_period, current_price, next_price, holdings,transaction_cost)
+            total_reward += reward.item() if isinstance(reward, pd.Series) else reward
             
             # 状态更新
             next_state = train_data[features].iloc[t + 1].values.reshape(1, -1)
-            agent.remember(state, action, reward, next_state, t == len(train_data) - 2)
+            agent.remember(state, action, reward, next_state, t == len(train_data) - 1)
             state = next_state
-            last_action = action
-            #previous_value = current_value
+            last_action = action 
 
             # 经验回放
+            n_step = 3
+            #if len(agent.memory) > batch_size + n_step:
+            #    agent.replay_n2(batch_size, n_step)
             if len(agent.memory) > batch_size:
                 agent.replay(batch_size)
             
+            
             # 日志输出
-            cash = float(cash)  # Ensure scalar value is used
-            current_price = float(current_price.iloc[0])
-            #logging.info(f"Episode: {episode + 1}, Step: {t + 1}, Action: {action}, Cash: {cash:.2f}, Holdings: {holdings_value:.2f}, "
-            #             f"Reward: {reward:.4f}, Total Value: {current_value:.2f}")
             logging.info(f"Episode: {episode + 1},Action:{action},Step: {t + 1},Cash: {cash:.2f},Holdings: {holdings}, "
-                         f"Current Price: {current_price:.2f},Current Value:{current_value:.2f},Previous Value:{previous_value:.2f},Reward:{reward:.4f},Total_reward:{total_reward:.4f}")
+                         f"Current Price: {current_price:.2f}, Next_price:{next_price:.2f},Current Value:{current_value:.2f},Previous Value:{previous_value:.2f},Reward:{reward},Total_reward:{total_reward:.4f}")
             previous_value = current_value
         # 记录每个 epoch 的总奖励
         total_value = cash + holdings_value * next_price
@@ -348,7 +517,6 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
     plt.xlabel("Epoch")
     plt.ylabel("Total Reward")
     plt.legend()
-    plt.show()  # 显示图像
     plt.close()  # 关闭图像以释放资源
 
     # 保存模型
@@ -369,8 +537,9 @@ def backtest(agent, test_data, features, initial_balance=100000.0, transaction_c
 
     for t in range(len(test_data) - 1):
         state = test_data[features].iloc[t].values.reshape(1, -1)
-        action = agent.act(state)  # Ensure action is a scalar
-        current_price = float(test_data['Close'].iloc[t])
+        action,q_values = agent.act(state)  # Ensure action is a scalar
+        print(q_values)
+        current_price = test_data['Close'].iloc[t].iloc[0]
         # 动作逻辑
         if action == 0 and cash >= current_price * (1 + transaction_cost):  # 买入
             max_shares = int(cash // (current_price * (1 + transaction_cost)))
@@ -467,7 +636,7 @@ if __name__ == "__main__":
         plt.title("Trading Strategy - Buy & Sell Signals")
         plt.legend()
         plt.savefig(os.path.join(output_dir, "trading_strategy_signals.png"))  # 保存图像
-        plt.show()  # 显示图像
+        #plt.show()  # 显示图像
         plt.close()  # 关闭图像以释放资源
     else:
         logging.error("No valid test data available for plotting.")
@@ -477,5 +646,5 @@ if __name__ == "__main__":
     plt.title("Portfolio Value Over Time")
     plt.legend()
     plt.savefig(os.path.join(output_dir, "portfolio_value_over_time.png"))  # 保存图像
-    plt.show()  # 显示图像
+    #plt.show()  # 显示图像
     plt.close()  # 关闭图像以释放资源
