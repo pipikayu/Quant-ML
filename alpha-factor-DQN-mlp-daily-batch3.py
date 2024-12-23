@@ -593,8 +593,8 @@ if __name__ == "__main__":
     ticker = sys.argv[1] if len(sys.argv) > 1 else "BABA"  # 处理命令行参数
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")  # 获取当前时间戳
-    output_dir = f"{ticker}-DQN-RL-Daily-{timestamp}"  # 创建文件夹名，添加 ticker 前缀
-    print (output_dir)
+    output_dir = f"./data/DQN-RL-Daily/{ticker}-{timestamp}"  # 创建文件夹名，添加 ticker 前缀
+    print(output_dir)
     os.makedirs(output_dir, exist_ok=True)  # 创建文件夹
 
     # Configure logging to save to a file
@@ -606,7 +606,7 @@ if __name__ == "__main__":
     )
 
     start_date = "2020-01-01"
-    print (ticker)
+    print(ticker)
     data = download_daily_data(ticker, start_date)
     data = calculate_alpha_factors(data)
     data, features = prepare_data(data)
