@@ -633,18 +633,16 @@ if __name__ == "__main__":
         plt.scatter(test_data.index[buy_signal_indices], test_data['Close'].iloc[buy_signal_indices], marker='^', color='g', label='Buy Signal', alpha=1)
         sell_signal_indices = [test_data.index.get_loc(ts) for ts in sell_signals]
         plt.scatter(test_data.index[sell_signal_indices], test_data['Close'].iloc[sell_signal_indices], marker='v', color='r', label='Sell Signal', alpha=1)
-        plt.title("Trading Strategy - Buy & Sell Signals")
+        plt.title(f"Trading Strategy - Buy & Sell Signals for {ticker}")
         plt.legend()
-        plt.savefig(os.path.join(output_dir, "trading_strategy_signals.png"))  # 保存图像
-        #plt.show()  # 显示图像
-        plt.close()  # 关闭图像以释放资源
+        plt.savefig(os.path.join(output_dir, "trading_strategy_signals.png"))  # Save image
+        plt.close()  # Close the figure to free resources
     else:
         logging.error("No valid test data available for plotting.")
 
     plt.figure(figsize=(14, 7))
     plt.plot(portfolio_values, label="Portfolio Value")
-    plt.title("Portfolio Value Over Time")
+    plt.title(f"Portfolio Value Over Time for {ticker}")
     plt.legend()
-    plt.savefig(os.path.join(output_dir, "portfolio_value_over_time.png"))  # 保存图像
-    #plt.show()  # 显示图像
-    plt.close()  # 关闭图像以释放资源
+    plt.savefig(os.path.join(output_dir, "portfolio_value_over_time.png"))  # Save image
+    plt.close()  # Close the figure to free resources

@@ -15,12 +15,28 @@ from tensorflow.keras.initializers import HeNormal  # 导入 HeNormal 初始化�
 import os  # Add this import statement
 import xgboost as xgb  # 引入 XGBoost
 import sys
+import matplotlib
+matplotlib.use('Agg')  # Use a non-interactive backend
 
 def download_daily_data(ticker, start_date):
     logging.info(f"Fetching daily data for {ticker} from {start_date}.")
     end_date = datetime.datetime.now().strftime("%Y-%m-%d")  # Get the latest date
-    data = yf.download(ticker, start=start_date, end=end_date, interval="1d")
-    return data
+    
+    # 重试机制
+    retries = 5
+    for attempt in range(retries):
+        try:
+            data = yf.download(ticker, start=start_date, end=end_date, interval="1d")
+            if data.empty:
+                raise ValueError("Downloaded data is empty.")
+            return data
+        except Exception as e:
+            logging.error(f"Attempt {attempt + 1} failed: {e}")
+            if attempt < retries - 1:  # 如果不是最后一次尝试
+                time.sleep(10)  # 等待 10 秒再重试
+            else:
+                logging.error("All attempts to download data failed.")
+                return None
 
 def calculate_alpha_factors(data):
     logging.info("Calculating alpha factors...")
@@ -109,7 +125,6 @@ def prepare_data(data, ticker):
     for feature in features:
         ln_feature_name = "ln_"+feature
         logging.info(feature)
-        print(ln_feature_name)
         logging.info(ln_feature_name)
         data[ln_feature_name] = np.log1p(data[feature])  # 使用 log1p 处理
         ln_features.append(ln_feature_name)
@@ -133,14 +148,12 @@ def prepare_data(data, ticker):
                 div_features.append(new_feature_name)
 
     features += ln_features + multi_features + div_features  # 更新特征列表
-    # 计算未来 12 个周期的最大和最小收盘价
+    # 计算未来 10 个周期的最大和最小收盘价
     data = data.iloc[::-1]
-    data['future_max_close'] = data['Close'].rolling(window=10).max()
-    data['future_min_close'] = data['Close'].rolling(window=10).min()
+    data['future_max_close'] = data['Close'].rolling(window=5).max()
+    data['future_min_close'] = data['Close'].rolling(window=5).min()    
+    # 反转数据以恢复原始顺序
     data = data.iloc[::-1]
-
-    print(data.columns)  # 确认是否包含 'future_max_close' 和 'future_min_close'
-    print(data[['future_max_close', 'future_min_close', 'Close']].isna().sum())  # 检查缺失值
     
     data['future_min_close'] = data['future_min_close'].fillna(data['Close'][ticker])  # 用当前收盘价填充
     data['future_max_close'] = data['future_max_close'].fillna(data['Close'][ticker])  # 用当前收盘价填充
@@ -148,10 +161,10 @@ def prepare_data(data, ticker):
     data['action'] = 2  # 默认设置为持有
 
     # 先设置买入信号
-    data.loc[data['future_max_close'] >= data['Close'][ticker] * 1.05, 'action'] = 0  # 买入
+    data.loc[(data['future_max_close'] >= data['Close'][ticker] * 1.05) & (data['future_min_close'] >= data['Close'][ticker] * 0.97), 'action'] = 0  # 买入
 
     # 然后设置卖出信号，只有在当前 action 仍为持有时才会更新
-    data.loc[(data['future_min_close'] <= data['Close'][ticker] * 0.96) & (data['action'] == 2), 'action'] = 1  # 卖出
+    data.loc[data['future_min_close'] <= data['Close'][ticker] * 0.96, 'action'] = 1  # 卖出
 
     # 标准化特征，不包括 action 列
     scaler = StandardScaler()
@@ -302,7 +315,9 @@ def backtest(model, test_data, features, initial_balance=100000.0, transaction_c
 
 if __name__ == "__main__":
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")  # 获取当前时间戳
-    output_dir = f"Xgboost-Daily-{timestamp}"  # 创建文件夹名
+    ticker = sys.argv[1] if len(sys.argv) > 1 else "BABA"  # 处理命令行参数
+    start_date = "2020-01-01"
+    output_dir = f"./data/Xgboost-Daily/{ticker}-Xgboost-Daily-{timestamp}"  # 创建文件夹名
     os.makedirs(output_dir, exist_ok=True)  # 创建文件夹
 
     # Configure logging to save to a file
@@ -341,16 +356,16 @@ if __name__ == "__main__":
         plt.scatter(test_data.index[buy_signal_indices], test_data['Close'].iloc[buy_signal_indices], marker='^', color='g', label='Buy Signal', alpha=1)
         sell_signal_indices = [test_data.index.get_loc(ts) for ts in sell_signals]
         plt.scatter(test_data.index[sell_signal_indices], test_data['Close'].iloc[sell_signal_indices], marker='v', color='r', label='Sell Signal', alpha=1)
-        plt.title("Trading Strategy - Buy & Sell Signals")
+        plt.title(f"Trading Strategy - Buy & Sell Signals for {ticker}")  # 添加 ticker 名称
         plt.legend()
         plt.savefig(os.path.join(output_dir, "trading_strategy_signals.png"))  # 保存图像
-        plt.show()
+        #plt.show()
     else:
         logging.error("No valid data available for plotting.")
 
     plt.figure(figsize=(14, 7))
     plt.plot(portfolio_values, label="Portfolio Value")
-    plt.title("Portfolio Value Over Time")
+    plt.title("Portfolio Value Over Time for " + ticker)  # 添加 ticker 名称
     plt.legend()
     plt.savefig(os.path.join(output_dir, "portfolio_value_over_time.png"))  # 保存图像
-    plt.show()
+    #plt.show()
