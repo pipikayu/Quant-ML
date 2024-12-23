@@ -328,7 +328,6 @@ if __name__ == "__main__":
         filemode='w'  # 'w' to overwrite the file each time, 'a' to append
     )
 
-    ticker, start_date = "BABA", "2018-01-01"
     data = download_daily_data(ticker, start_date)
     data = calculate_alpha_factors(data)
     data, features = prepare_data(data, ticker)
