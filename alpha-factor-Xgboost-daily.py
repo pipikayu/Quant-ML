@@ -121,6 +121,7 @@ def prepare_data(data, ticker):
         return None, features  # Return None to indicate failure
 
     # 新增特征：对已有特征取自然对数
+    '''
     ln_features = []
     for feature in features:
         ln_feature_name = "ln_"+feature
@@ -146,8 +147,9 @@ def prepare_data(data, ticker):
                 new_feature_name = f"{ln_features[i]}_div_{ln_features[j]}"
                 data[new_feature_name] = data[ln_features[i]] / (data[ln_features[j]] + 0.5)  # 分母加0.5
                 div_features.append(new_feature_name)
-
+    
     features += ln_features + multi_features + div_features  # 更新特征列表
+    '''
     # 计算未来 10 个周期的最大和最小收盘价
     data = data.iloc[::-1]
     data['future_max_close'] = data['Close'].rolling(window=5).max()
@@ -159,10 +161,8 @@ def prepare_data(data, ticker):
     data['future_max_close'] = data['future_max_close'].fillna(data['Close'][ticker])  # 用当前收盘价填充
     # 初始化 action 列为持有
     data['action'] = 2  # 默认设置为持有
-
     # 先设置买入信号
-    data.loc[(data['future_max_close'] >= data['Close'][ticker] * 1.05) & (data['future_min_close'] >= data['Close'][ticker] * 0.97), 'action'] = 0  # 买入
-
+    data.loc[(data['future_max_close'] >= data['Close'][ticker] * 1.03) & (data['future_min_close'] >= data['Close'][ticker] * 0.98), 'action'] = 0  # 买入
     # 然后设置卖出信号，只有在当前 action 仍为持有时才会更新
     data.loc[data['future_min_close'] <= data['Close'][ticker] * 0.96, 'action'] = 1  # 卖出
 
@@ -182,7 +182,16 @@ def prepare_data(data, ticker):
     
     return data, features
 
-def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001, train_split=0.75, model_save_path="xgboost_model.json"):
+def focal_loss(gamma=2.0, alpha=0.25):
+    def focal_loss_fixed(y_true, y_pred):
+        y_true = y_true.get_label()
+        y_pred = 1.0 / (1.0 + np.exp(-y_pred))  # Sigmoid
+        loss = -alpha * (1 - y_pred) ** gamma * y_true * np.log(y_pred) - \
+               (1 - alpha) * y_pred ** gamma * (1 - y_true) * np.log(1 - y_pred)
+        return 'focal_loss', np.mean(loss)
+    return focal_loss_fixed
+
+def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001, train_split=0.8, model_save_path="xgboost_model.json"):
     """
     训练 XGBoost 智能体，基于给定的市场数据和特征。
     """
@@ -209,16 +218,18 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
         objective='multi:softprob',
         num_class=3,
         learning_rate=0.1,
-        max_depth=6,
+        max_depth=3,
         min_child_weight=1,
         subsample=0.8,
         colsample_bytree=0.8,
         n_estimators=100,
-        reg_alpha=1  # 添加L1正则化参数
+        reg_alpha=1, # 添加L1正则化参数
+        class_weight='balanced'
     )
 
     # 记录训练过程中的损失
     evals = [(X_train, y_train)]  # 训练集
+    
     model.fit(X_train, y_train, eval_set=evals, verbose=True)
 
     # 保存模型
@@ -230,25 +241,13 @@ def train_agent(data, features, initial_balance=100000.0, transaction_cost=0.001
 def backtest(model, test_data, features, initial_balance=100000.0, transaction_cost=0.001, model_path="xgboost_model.json"):
     """
     使用训练好的智能体进行回测，评估策略表现，并输出专业回测指标。
-    
-    # Load the model using XGBClassifier
-    model = xgb.XGBClassifier()  # Create an instance of XGBClassifier
-    try:
-        model.load_model(model_path)  # Load the trained model
-        logging.info(f"Model loaded from {model_path} successfully.")  # Log the successful loading of the model
-    except Exception as e:
-        logging.error(f"Failed to load model from {model_path}: {e}")
-        return None, [], []  # Return early if model loading fails
-
-    # Check if the model has been loaded correctly
-    if not hasattr(model, 'predict') or not hasattr(model, 'predict_proba'):
-        logging.error("Loaded model does not have the required prediction methods.")
-        return None, [], []  # Return early if model is not valid
     """
     cash, holdings = initial_balance, 0
     portfolio_values = []  # 保存每个时间步的资产价值
     daily_returns = []  # 保存每日收益率
     buy_signals, sell_signals = [], []
+    strong_buy_signals, strong_sell_signals = [], []
+    stop_loss_threshold = 0.07  # 7%止损阈值
 
     # 确保测试数据的特征列与训练时一致
     if not all(feature in test_data.columns for feature in features):
@@ -260,22 +259,34 @@ def backtest(model, test_data, features, initial_balance=100000.0, transaction_c
         
         # 使用 predict_proba 方法进行预测
         probabilities = model.predict_proba(state)  # 获取每个类别的概率
-        
-        # 选择概率最高的类别
+        logging.info(f"Probabilities: {probabilities}")  # 打印概率到日志
         action = np.argmax(probabilities)  # 获取概率最高的类别索引
-        current_price = float(test_data['Close'].iloc[t])
+        current_price = test_data['Close'].iloc[t].iloc[0]
         
         # 动作逻辑
-        if action == 0 and cash >= current_price * (1 + transaction_cost):  # 买入
+        if action == 0 and cash >= current_price * (1 + transaction_cost) and probabilities[0][0] >= 0.4:  # 买入
             max_shares = int(cash // (current_price * (1 + transaction_cost)))
             cash -= max_shares * current_price * (1 + transaction_cost)
             holdings += max_shares
             buy_signals.append(test_data.index[t])
+            buy_price = current_price  # 记录买入价格
 
         elif action == 1 and holdings > 0:  # 卖出
             cash += holdings * current_price * (1 - transaction_cost)
             holdings = 0
             sell_signals.append(test_data.index[t])
+
+        # 检查止损条件
+        if holdings > 0 and current_price < buy_price * (1 - stop_loss_threshold):  # 如果当前价格低于买入价格的93%
+            cash += holdings * current_price * (1 - transaction_cost)  # 卖出
+            holdings = 0
+            sell_signals.append(test_data.index[t])
+            logging.info(f"Stop loss triggered at {current_price:.2f} on {test_data.index[t]}.")
+
+        if probabilities[0][0] >= 0.5:
+            strong_buy_signals.append(test_data.index[t])
+        elif probabilities[0][1] >= 0.5:
+            strong_sell_signals.append(test_data.index[t])
 
         # 计算当前组合的资产价值
         portfolio_value = cash + holdings * current_price
@@ -310,14 +321,15 @@ def backtest(model, test_data, features, initial_balance=100000.0, transaction_c
     logging.info(f"Sharpe Ratio: {sharpe_ratio:.2f}")
     logging.info(f"Win Rate: {win_rate * 100:.2f}%")
     
-    return portfolio_values, buy_signals, sell_signals
+    return portfolio_values, buy_signals, sell_signals, strong_buy_signals, strong_sell_signals
 
 
 if __name__ == "__main__":
+    current_date = datetime.datetime.now().strftime("%Y-%m-%d")  # 计算当前日期并转换为字符串
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")  # 获取当前时间戳
     ticker = sys.argv[1] if len(sys.argv) > 1 else "BABA"  # 处理命令行参数
     start_date = "2020-01-01"
-    output_dir = f"./data/Xgboost-Daily/{ticker}-Xgboost-Daily-{timestamp}"  # 创建文件夹名
+    output_dir = f"./data/Xgboost-Daily-{current_date}/{ticker}-Xgboost-Daily-{current_date}"  # 创建文件夹名
     os.makedirs(output_dir, exist_ok=True)  # 创建文件夹
 
     # Configure logging to save to a file
@@ -343,7 +355,7 @@ if __name__ == "__main__":
     # 检查是否有有效的测试数据
     if test_data is not None and not test_data.empty:
         # 进行回测
-        portfolio_values, buy_signals, sell_signals = backtest(model, test_data, features, model_path=os.path.join(output_dir, "xgboost_model.json"))
+        portfolio_values, buy_signals, sell_signals, strong_buy_signals, strong_sell_signals = backtest(model, test_data, features, model_path=os.path.join(output_dir, "xgboost_model.json"))
     else:
         logging.error("No valid data available for backtesting.")
         exit()  # Prevents the code from trying to plot None values
@@ -353,8 +365,12 @@ if __name__ == "__main__":
         plt.plot(test_data['Close'], label='Close Price')
         buy_signal_indices = [test_data.index.get_loc(ts) for ts in buy_signals]
         plt.scatter(test_data.index[buy_signal_indices], test_data['Close'].iloc[buy_signal_indices], marker='^', color='g', label='Buy Signal', alpha=1)
+        strong_buy_signal_indices = [test_data.index.get_loc(ts) for ts in strong_buy_signals]
+        plt.scatter(test_data.index[strong_buy_signal_indices], test_data['Close'].iloc[strong_buy_signal_indices], marker='^', color='yellow', label='Strong Buy Signal', alpha=1)
         sell_signal_indices = [test_data.index.get_loc(ts) for ts in sell_signals]
         plt.scatter(test_data.index[sell_signal_indices], test_data['Close'].iloc[sell_signal_indices], marker='v', color='r', label='Sell Signal', alpha=1)
+        strong_sell_signal_indices = [test_data.index.get_loc(ts) for ts in strong_sell_signals]
+        plt.scatter(test_data.index[strong_sell_signal_indices], test_data['Close'].iloc[strong_sell_signal_indices], marker='v', color='orange', label='Strong Sell Signal', alpha=1)
         plt.title(f"Trading Strategy - Buy & Sell Signals for {ticker}")  # 添加 ticker 名称
         plt.legend()
         plt.savefig(os.path.join(output_dir, "trading_strategy_signals.png"))  # 保存图像
